@@ -53,8 +53,8 @@ export function findStocks(stocks, query, limit = 10) {
 }
 
 export function extractFiscalYear(title) {
-  // 同时匹配「2025年年度报告」和「2025年度报告」，不把披露年份当财务年度。
-  const m = String(title).replace(/<[^>]*>/g, '').match(/(20\d{2})\s*年\s*(?:年度报告|度报告)/u);
+  // 同时匹配「2025年年度报告」「2025年度报告」和「600704_物产中大_2025年_年度报告20260427」，不把披露年份当财务年度。
+  const m = String(title).replace(/<[^>]*>/g, '').match(/(20\d{2})\s*年[\s_—–-]*(?:年度报告|度报告)/u);
   return m ? Number(m[1]) : null;
 }
 
