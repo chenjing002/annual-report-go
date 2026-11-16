@@ -1,9 +1,11 @@
-import { groupReports, marketForCode } from './core.mjs';
+import { groupQuarterlyReports, groupReports, marketForCode } from './core.mjs';
 
 const CNINFO = 'https://www.cninfo.com.cn';
 const REPORT_TTL = 12 * 3600;
 const STALE_TTL = 7 * 86400;
 const MAX_PAGES = 8;
+const ANNUAL_CATEGORY = 'category_ndbg_szsh;';
+const QUARTERLY_CATEGORY = 'category_yjdbg_szsh;category_bndbg_szsh;category_sjdbg_szsh;';
 
 function json(body, status = 200, extra = {}) {
   return new Response(JSON.stringify(body), { status, headers: {
@@ -39,14 +41,14 @@ async function upstream(url, init = {}) {
   } finally { clearTimeout(timer); }
 }
 
-async function queryWindow(stock, start, end, market) {
+async function queryWindow(stock, start, end, market, category) {
   const results = [];
   let pages = 1;
   for (let page = 1; page <= Math.min(MAX_PAGES, pages); page++) {
     const body = new URLSearchParams({
       stock: `${stock.code},${stock.orgId}`, tabName: 'fulltext', pageNum: String(page),
       pageSize: '30', column: market.column, plate: market.plate,
-      category: 'category_ndbg_szsh;', seDate: `${start}~${end}`,
+      category, seDate: `${start}~${end}`,
       searchkey: '', trade: '', isHLtitle: 'true'
     });
     const data = await upstream(`${CNINFO}/new/hisAnnouncement/query`, {
@@ -74,20 +76,24 @@ async function getStock(code, env, request) {
 
 async function reportData(stock) {
   const now = new Date();
-  const maxYear = now.getUTCFullYear() - 1;
+  const year = now.getUTCFullYear();
+  const maxYear = year - 1;
   const minYear = maxYear - 9;
   const market = marketForCode(stock.code);
   const windows = [
-    [`${minYear + 1}-01-01`, `${minYear + 5}-12-31`],
-    [`${minYear + 6}-01-01`, `${now.getUTCFullYear()}-12-31`]
+    [`${minYear + 1}-01-01`, `${minYear + 5}-12-31`, ANNUAL_CATEGORY],
+    [`${minYear + 6}-01-01`, `${year}-12-31`, ANNUAL_CATEGORY],
+    [`${year}-01-01`, `${year}-12-31`, QUARTERLY_CATEGORY]
   ];
-  const attempts = await Promise.allSettled(windows.map(([a, b]) => queryWindow(stock, a, b, market)));
+  const attempts = await Promise.allSettled(windows.map(([a, b, c]) => queryWindow(stock, a, b, market, c)));
   if (attempts.some(x => x.status === 'rejected')) {
     const error = attempts.find(x => x.status === 'rejected').reason;
     throw error; // Never cache incomplete results as a complete decade.
   }
+  const [older, recent, quarterly] = attempts.map(x => x.value);
   return { stock: { code: stock.code, name: stock.name },
-    reports: groupReports(attempts.flatMap(x => x.value), stock.code, stock.orgId, now.getUTCFullYear()),
+    reports: groupReports([...older, ...recent], stock.code, stock.orgId, year),
+    quarterly: { year, reports: groupQuarterlyReports(quarterly, stock.code, stock.orgId, year) },
     source: 'cninfo', partial: false, fetchedAt: now.toISOString() };
 }
 
@@ -95,8 +101,8 @@ async function reportRequest(request, env, ctx, url) {
   const code = url.searchParams.get('code') || '';
   if (!/^\d{6}$/.test(code)) return json({ error: '股票代码必须为6位数字', code: 'INVALID_CODE' }, 400);
   const cache = caches.default;
-  const key = new Request(new URL(`/__cache/reports/${code}`, url.origin));
-  const staleKey = new Request(new URL(`/__cache/stale/${code}`, url.origin));
+  const key = new Request(new URL(`/__cache/v2/reports/${code}`, url.origin));
+  const staleKey = new Request(new URL(`/__cache/v2/stale/${code}`, url.origin));
   const refresh = url.searchParams.get('refresh') === '1';
   if (!refresh) {
     const hit = await cache.match(key);

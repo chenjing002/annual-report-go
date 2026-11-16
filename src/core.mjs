@@ -58,9 +58,31 @@ export function extractFiscalYear(title) {
   return m ? Number(m[1]) : null;
 }
 
+// H股公告是同一份季报的港股副本，不作为 A 股原文。
+const NOT_FULL_REPORT = /摘要|英文版|英文报告|English|H股|关于|取消|提示性|问询|回复|答复|补充公告|鉴证报告|审计报告|意见|业绩预告/i;
+const REVISED = /更新后|修订|更正后|更正版|修正版/;
+const cleanTitle = title => String(title).replace(/<[^>]*>/g, '').replace(/\s+/g, '');
+
 export function isFullAnnualReport(title) {
-  const t = String(title).replace(/<[^>]*>/g, '').replace(/\s+/g, '');
-  return extractFiscalYear(t) !== null && !/摘要|英文版|英文报告|English|关于|取消|提示性|问询|回复|答复|补充公告|鉴证报告|审计报告|意见|业绩预告/i.test(t);
+  const t = cleanTitle(title);
+  return extractFiscalYear(t) !== null && !NOT_FULL_REPORT.test(t);
+}
+
+// 按披露先后倒序排列。兼容「2026年第三季度报告」「2026年三季度报告」「2026半年度报告」「2026年度第一季度报告」。
+export const QUARTERLY_PERIODS = [
+  { period: 'q3', label: '三季报', pattern: /(20\d{2})年?度?[_—–-]*第?[三3]季度报告/u },
+  { period: 'h1', label: '半年报', pattern: /(20\d{2})年?度?[_—–-]*(?:半年度|中期)报告/u },
+  { period: 'q1', label: '一季报', pattern: /(20\d{2})年?度?[_—–-]*第?[一1]季度报告/u }
+];
+
+export function extractQuarterlyPeriod(title) {
+  const t = cleanTitle(title);
+  if (NOT_FULL_REPORT.test(t)) return null;
+  for (const { period, pattern } of QUARTERLY_PERIODS) {
+    const m = t.match(pattern);
+    if (m) return { year: Number(m[1]), period };
+  }
+  return null;
 }
 
 export function asPdfUrl(path) {
@@ -76,9 +98,30 @@ export function makeDetailUrl(ann, code, orgId) {
 }
 
 function editionScore(title, time) {
-  const t = String(title);
-  const revised = /更新后|修订|更正后|更正版|修正版/.test(t) ? 10000000000000 : 0;
+  const revised = REVISED.test(String(title)) ? 10000000000000 : 0;
   return revised + (Number(time) || 0);
+}
+
+function toReportItem(a, code, orgId) {
+  const pdfUrl = asPdfUrl(a.adjunctUrl);
+  if (!pdfUrl) return null;
+  const title = String(a.announcementTitle).replace(/<[^>]*>/g, '');
+  return {
+    title, pdfUrl,
+    detailUrl: makeDetailUrl(a, code, orgId),
+    announcedOn: a.announcementTime ? new Date(Number(a.announcementTime) + 8 * 3600000).toISOString().slice(0, 10) : null,
+    revised: REVISED.test(title),
+    order: editionScore(title, a.announcementTime)
+  };
+}
+
+// 北交所证券可能从 8 开头迁移至 92 开头，机构 ID 保持不变。
+const isOtherCompany = (a, code, orgId) => a.secCode && a.secCode !== code && a.orgId !== orgId;
+
+function editionsOf(items = []) {
+  const editions = items.sort((a, b) => b.order - a.order);
+  for (const edition of editions) delete edition.order;
+  return { available: editions.length > 0, primary: editions[0] || null, editions };
 }
 
 export function groupReports(announcements, code, orgId, nowYear = new Date().getFullYear()) {
@@ -86,27 +129,28 @@ export function groupReports(announcements, code, orgId, nowYear = new Date().ge
   const maxYear = nowYear - 1;
   const grouped = new Map();
   for (const a of announcements || []) {
-    // 北交所证券可能从 8 开头迁移至 92 开头，机构 ID 保持不变。
-    if (a.secCode && a.secCode !== code && a.orgId !== orgId) continue;
-    if (!isFullAnnualReport(a.announcementTitle)) continue;
+    if (isOtherCompany(a, code, orgId) || !isFullAnnualReport(a.announcementTitle)) continue;
     const year = extractFiscalYear(a.announcementTitle);
-    const pdfUrl = asPdfUrl(a.adjunctUrl);
-    if (year < minYear || year > maxYear || !pdfUrl) continue;
-    const title = String(a.announcementTitle).replace(/<[^>]*>/g, '');
-    const item = {
-      title, year, pdfUrl,
-      detailUrl: makeDetailUrl(a, code, orgId),
-      announcedOn: a.announcementTime ? new Date(Number(a.announcementTime) + 8 * 3600000).toISOString().slice(0, 10) : null,
-      revised: /更新后|修订|更正后|更正版|修正版/.test(title),
-      order: editionScore(title, a.announcementTime)
-    };
+    const item = toReportItem(a, code, orgId);
+    if (year < minYear || year > maxYear || !item) continue;
     if (!grouped.has(year)) grouped.set(year, []);
-    grouped.get(year).push(item);
+    grouped.get(year).push({ ...item, year });
   }
   return Array.from({ length: REPORT_YEARS }, (_, i) => {
     const year = maxYear - i;
-    const editions = (grouped.get(year) || []).sort((a, b) => b.order - a.order);
-    for (const edition of editions) delete edition.order;
-    return { year, available: editions.length > 0, primary: editions[0] || null, editions };
+    return { year, ...editionsOf(grouped.get(year)) };
   });
+}
+
+export function groupQuarterlyReports(announcements, code, orgId, year) {
+  const grouped = new Map();
+  for (const a of announcements || []) {
+    if (isOtherCompany(a, code, orgId)) continue;
+    const found = extractQuarterlyPeriod(a.announcementTitle);
+    const item = found?.year === year && toReportItem(a, code, orgId);
+    if (!item) continue;
+    if (!grouped.has(found.period)) grouped.set(found.period, []);
+    grouped.get(found.period).push(item);
+  }
+  return QUARTERLY_PERIODS.map(({ period, label }) => ({ period, label, ...editionsOf(grouped.get(period)) }));
 }

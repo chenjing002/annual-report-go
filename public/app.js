@@ -86,11 +86,11 @@ function createLink(label, url) {
   const a = document.createElement('a'); a.href = url; a.textContent = label;
   a.target = '_blank'; a.rel = 'noopener noreferrer'; return a;
 }
-function renderReportRows(rows) {
-  const list = $('reportRows'); list.replaceChildren();
+function renderReportRows(list, rows, emptyText) {
+  list.replaceChildren();
   for (const r of rows) {
     const row = document.createElement('div'); row.className = 'report-row';
-    const year = document.createElement('div'); year.className = 'year'; year.textContent = r.year;
+    const year = document.createElement('div'); year.className = 'year'; year.textContent = r.label || r.year;
     const info = document.createElement('div'); const actions = document.createElement('div'); actions.className = 'links';
     if (r.available) {
       const title = document.createElement('div'); title.className = 'report-title'; title.textContent = r.primary.title;
@@ -106,7 +106,7 @@ function renderReportRows(rows) {
         info.append(details);
       }
     } else {
-      const message = document.createElement('div'); message.className = 'state'; message.textContent = '暂无年报'; info.append(message);
+      const message = document.createElement('div'); message.className = 'state'; message.textContent = emptyText; info.append(message);
     }
     row.append(year, info, actions); list.append(row);
   }
@@ -122,7 +122,8 @@ async function selectStock(s, refresh = false) {
   $('companyMeta').textContent = s.code;
   $('reportsNote').className = 'reports-note';
   $('reportsNote').textContent = '正在查询…';
-  $('reportRows').replaceChildren();
+  $('quarterlyGroup').hidden = true;
+  $('annualGroup').hidden = true;
   saveRecent(s);
   const url = new URL(location.href); url.searchParams.set('code', s.code); history.replaceState(null, '', url.pathname + url.search);
   const thisCode = s.code;
@@ -134,7 +135,14 @@ async function selectStock(s, refresh = false) {
     $('companyName').textContent = result.stock.name !== s.code ? result.stock.name : s.name;
     $('reportsNote').className = `reports-note${result.stale ? ' warning' : ''}`;
     $('reportsNote').textContent = result.stale ? result.warning : '';
-    renderReportRows(result.reports);
+    const quarterly = result.quarterly;
+    if (quarterly?.reports) {
+      $('quarterlyTitle').textContent = `${quarterly.year} 年季报`;
+      renderReportRows($('quarterlyRows'), quarterly.reports, '暂未披露');
+      $('quarterlyGroup').hidden = false;
+    }
+    renderReportRows($('reportRows'), result.reports, '暂无年报');
+    $('annualGroup').hidden = false;
   } catch (e) {
     if (selectedStock?.code !== thisCode) return;
     $('reportsNote').className = 'reports-note warning';
